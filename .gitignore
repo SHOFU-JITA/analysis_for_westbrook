@@ -1,0 +1,12 @@
+.Rhistory
+*/.Rhistory
+.RDataTmp
+*/.RDataTmp
+rawdata/*
+csv/*
+.Rproj.user
+*/.Rproj.user
+.RData
+*/.RData
+*.pdf
+*.csv
