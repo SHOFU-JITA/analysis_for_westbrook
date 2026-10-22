@@ -1,12 +1,23 @@
 # ===================================================================
-# Full R Script: CJS Analysis (Survival & Capture Probability)
-# with Season, Age, Cluster, and COHORT Effects
-# Includes Correction for Known Emigration Rates
+# Full R Script: CJS Analysis (Integrated Model)
+# - Includes Main Effects and Interactions
+# - Includes Season, Age, Cohort, and Cluster Effects
+# - Emigration Correction Included
 # ===================================================================
 
 # ===== 0. Environment Reset =====
 rm(list = ls(all.names = TRUE))
 gc()
+
+# ===== 0.1. Configuration: Set Parameters =====
+# Set the number of clusters
+K_CLUSTERS <- 3
+
+CLUSTER_COLORS <- c("steelblue", "aquamarine3", "salmon3")
+
+# Set the cohort range for analysis
+START_COHORT <- 2000
+END_COHORT   <- 2015
 
 # ===== 0.5. Set Working Directory to Script Location =====
 tryCatch({
@@ -29,17 +40,17 @@ tryCatch({
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(readr, dplyr, tidyr, ggplot2, RMark, lubridate, purrr, tibble, rlang)
 
-CLUSTER_COL_NAME   <- "cluster_k3"        
-FILE_SUFFIX        <- "bkt3"  
+# -------------------------------------------------------------------
+# Auto-generate variables based on K_CLUSTERS and cohort range
+# -------------------------------------------------------------------
+CLUSTER_COL_NAME   <- paste0("cluster_k", K_CLUSTERS)         
+FILE_SUFFIX        <- paste0("bkt", K_CLUSTERS) 
+EMIGRATION_FILE_PATH <- paste0("../Movingout/moveout_by_cluster_k", K_CLUSTERS, "_bkt.csv")
 START_SEASON_INDEX <- 2
-
-library(tidyverse)
 
 # ===================================================================
 # 1.5. Input: Known Emigration Rates
 # ===================================================================
-EMIGRATION_FILE_PATH <- "../Movingout/moveout_by_cluster_k3_bkt.csv"
-
 DF_EMIGRATION <- read_csv(EMIGRATION_FILE_PATH) %>%
   select(
     cluster_id = all_of(CLUSTER_COL_NAME),
@@ -65,8 +76,6 @@ DF_EMIGRATION <- read_csv(EMIGRATION_FILE_PATH) %>%
     fidelity
   )
 
-print(head(DF_EMIGRATION))
-
 # ===================================================================
 # 2. Load & Preprocess Data
 # ===================================================================
@@ -74,8 +83,10 @@ print(head(DF_EMIGRATION))
 df_raw <- read_csv("../Clustering/WB_bkt_clustered_rev2.csv")
 df_raw$date <- as.Date(df_raw$date)
 
-# ===== 3. Calculate SEASONS (with Winter Correction) =====
+# ===== 3. Calculate SEASONS (with Winter Correction & Cohort Filter) =====
 df <- df_raw %>%
+  # Filter data by the specified cohort range
+  filter(cohort >= START_COHORT & cohort <= END_COHORT) %>%
   mutate(
     month_val = month(date),
     cal_year = year(date),
@@ -111,28 +122,32 @@ new_col_names <- paste0("s", keep_cols_num)
 capture_history <- capture_history_full %>%
   select(tag, !!sym(CLUSTER_COL_NAME), cohort, all_of(keep_cols_str)) %>%
   rename_at(vars(keep_cols_str), ~new_col_names) %>%
-  filter(rowSums(select(., starts_with("s"))) > 0) %>%
-  mutate(cohort = as.factor(cohort))
+  filter(rowSums(select(., starts_with("s"))) > 0)
 
 message(paste0("Data prepared. Analysis starts from s", START_SEASON_INDEX, "."))
+message(paste0("Cohorts included: ", START_COHORT, " to ", END_COHORT))
 message(paste0("N individuals: ", nrow(capture_history)))
 
 # ===================================================================
-# 5. CJS Model Function (Extracts BOTH Phi and p)
+# 5. CJS Integrated Model Function
 # ===================================================================
 
-run_and_extract_cjs_cohort <- function(data, cluster_name, phi_formula, p_formula, start_offset) {
+run_cjs_integrated <- function(data, phi_formula, p_formula, start_offset) {
   ch_data <- data
   
   cols_to_paste <- names(ch_data)[!names(ch_data) %in% c("tag", CLUSTER_COL_NAME, "cohort")]
   ch_data$ch <- apply(ch_data[, cols_to_paste], 1, paste0, collapse = "")
-  ch_data <- ch_data %>% select(tag, ch, cohort)
+  
+  # Convert cohort and cluster to factors
+  ch_data <- ch_data %>% 
+    select(tag, ch, cohort, !!sym(CLUSTER_COL_NAME)) %>%
+    mutate(across(c(cohort, !!sym(CLUSTER_COL_NAME)), as.factor))
   
   if (nrow(ch_data) < 2 || nchar(ch_data$ch[1]) <= 1) return(NULL)
   
-  # --- process.data ---
+  # --- process.data (All clusters combined) ---
   processed <- process.data(ch_data, model = "CJS", 
-                            groups = "cohort", 
+                            groups = c("cohort", CLUSTER_COL_NAME), 
                             begin.time = 0, 
                             time.intervals = rep(1, nchar(ch_data$ch[1]) - 1))
   
@@ -145,18 +160,17 @@ run_and_extract_cjs_cohort <- function(data, cluster_name, phi_formula, p_formul
   real_time_phi <- design$Phi$time + start_offset
   real_time_p   <- design$p$time + start_offset
   
+  # Add age group effect
   design$Phi$age_group <- factor(
     ifelse(real_time_phi < 4, "Age0",
            ifelse(real_time_phi < 8, "Age1", "Age2+")),
     levels = c("Age1", "Age2+", "Age0")
   )
   
+  # Add season effect
   season_labels <- c("1:Sp-Su", "2:Su-Au", "3:Au-Wi", "4:Wi-Sp")
   design$Phi$season_effect <- factor((real_time_phi %% 4) + 1, labels = season_labels)
   design$p$season_effect   <- factor((real_time_p %% 4) + 1, labels = season_labels)
-  
-  design$Phi[[CLUSTER_COL_NAME]] <- cluster_name
-  design$p[[CLUSTER_COL_NAME]]   <- cluster_name
   
   # --- Model Execution ---
   model <- mark(processed, design,
@@ -164,133 +178,130 @@ run_and_extract_cjs_cohort <- function(data, cluster_name, phi_formula, p_formul
                                         p = list(formula = p_formula)),
                 silent = TRUE, output = FALSE, delete = TRUE)
   
-  # --- Extract Phi (Survival) ---
-  phi_raw <- model$results$real %>%
-    tibble::rownames_to_column("param") %>%
-    filter(grepl("Phi", param)) %>%
-    mutate(cluster = cluster_name)
-  
-  # --- Extract p (Capture Probability) ---
-  p_raw <- model$results$real %>%
-    tibble::rownames_to_column("param") %>%
-    filter(grepl("p", param)) %>%
-    mutate(cluster = cluster_name)
-  
-  phi_with_covs <- tryCatch({
-    idx <- as.numeric(rownames(phi_raw))
-    covs <- model$design.data$Phi[idx, c("time", "group", "cohort", "age_group", "season_effect")]
-    res <- cbind(phi_raw, covs)
-    res$time <- as.numeric(as.character(res$time))
-    res$season_index <- res$time + start_offset
-    res
-  }, error = function(e) {
-    phi_raw$season_index <- (1:nrow(phi_raw) - 1) %% (nchar(ch_data$ch[1]) - 1) + start_offset
-    return(phi_raw)
-  })
-  
-  p_with_covs <- tryCatch({
-    idx_p <- as.numeric(rownames(p_raw))
-    covs_p <- model$design.data$p[idx_p, c("time", "group", "cohort", "season_effect")]
-    res_p <- cbind(p_raw, covs_p)
-    res_p$time <- as.numeric(as.character(res_p$time))
-    res_p$season_index <- res_p$time + start_offset
-    res_p
-  }, error = function(e) {
-    p_raw$season_index <- (1:nrow(p_raw) - 1) %% (nchar(ch_data$ch[1]) - 1) + start_offset
-    return(p_raw)
-  })
-  
-  return(list(phi = phi_with_covs, p = p_with_covs, model = model))
+  return(list(model = model, processed = processed, design = design))
 }
 
 # ===================================================================
-# 6. Run Analysis
+# 6. Run Integrated Analysis (Including Interactions)
 # ===================================================================
 
-cluster_list <- sort(unique(capture_history[[CLUSTER_COL_NAME]]))
+cl_var <- CLUSTER_COL_NAME
 
+# Define candidate models
 model_defs <- list(
-  list(name = "Phi_Age_Season_p_Season",  phi_formula = ~age_group + season_effect, p_formula = ~season_effect),
-  list(name = "Phi_Cluster_p_Season",      phi_formula = as.formula(paste0("~", CLUSTER_COL_NAME)), p_formula = ~season_effect),
-  list(name = "Phi_Age_Season_Cohort_p_Season", phi_formula = ~age_group + season_effect + cohort, p_formula = ~season_effect)
+  # 1. Null model (No cluster effect)
+  list(name = "Phi(Age+Season+Cohort)_p(Season)", 
+       phi_formula = ~age_group + season_effect + cohort, 
+       p_formula = ~season_effect),
+  
+  # 2. Main effect model (Survival varies by cluster)
+  list(name = "Phi(Cluster+Age+Season+Cohort)_p(Season)", 
+       phi_formula = as.formula(paste0("~", cl_var, " + age_group + season_effect + cohort")), 
+       p_formula = ~season_effect),
+  
+  # 3. Interaction: Cluster * Age Group
+  list(name = "Phi(Cluster*Age+Season+Cohort)_p(Season)", 
+       phi_formula = as.formula(paste0("~", cl_var, " * age_group + season_effect + cohort")), 
+       p_formula = ~season_effect),
+  
+  # 4. Interaction: Cluster * Season
+  list(name = "Phi(Cluster*Season+Age+Cohort)_p(Season)", 
+       phi_formula = as.formula(paste0("~", cl_var, " * season_effect + age_group + cohort")), 
+       p_formula = ~season_effect)
+  
+  # 5. Interaction: Cluster * Age and Cluster * Season
+ # list(name = "Phi(Cluster*Age+Cluster*Season+Cohort)_p(Season)", 
+    #   phi_formula = as.formula(paste0("~", cl_var, " * age_group + ", cl_var, " * season_effect + cohort")), 
+     #  p_formula = ~season_effect)
 )
 
-best_models_phi_data <- list()
-best_models_p_data   <- list() 
+results_list <- list()
 
-cat("\nProcessing Clusters...\n")
+cat("\nRunning Integrated Models...\n")
 
-for (cl_id in cluster_list) {
-  current_cluster_data <- capture_history %>% filter(!!sym(CLUSTER_COL_NAME) == cl_id)
-  cat(paste0("\nCluster: ", cl_id, " (n=", nrow(current_cluster_data), ")\n"))
+for (model_def in model_defs) {
+  cat(paste0("Running: ", model_def$name, " ... "))
   
-  cluster_results <- list()
+  res <- tryCatch({
+    run_cjs_integrated(capture_history, 
+                       model_def$phi_formula, 
+                       model_def$p_formula, 
+                       START_SEASON_INDEX)
+  }, error = function(e) { cat("Error\n"); return(NULL) })
   
-  for (model_def in model_defs) {
-    tryCatch({
-      result <- run_and_extract_cjs_cohort(
-        current_cluster_data, cl_id, 
-        model_def$phi_formula, model_def$p_formula, 
-        start_offset = START_SEASON_INDEX
-      )
-      
-      if (!is.null(result)) {
-        cluster_results[[length(cluster_results) + 1]] <- list(
-          name = model_def$name,
-          AICc = result$model$results$AICc,
-          phi = result$phi,
-          p = result$p
-        )
-        cat(".") 
-      }
-    }, error = function(e) cat("x"))
-  }
-  
-  if (length(cluster_results) > 0) {
-    df_aic <- bind_rows(lapply(cluster_results, function(x) data.frame(name = x$name, AICc = x$AICc))) %>% arrange(AICc)
-    print(head(df_aic, 1))
-    
-    best_res <- Filter(function(x) x$name == df_aic$name[1], cluster_results)[[1]]
-    
-    season_labels <- c("1:Sp-Su", "2:Su-Au", "3:Au-Wi", "4:Wi-Sp")
-    
-    # --- Aggregate Phi ---
-    phi_agg <- best_res$phi %>%
-      mutate(
-        season_num = (season_index %% 4) + 1,
-        season_effect = factor(season_num, levels = 1:4, labels = season_labels)
-      ) %>%
-      group_by(cluster, season_index, season_effect) %>%
-      summarise(
-        surv = mean(if("estimate" %in% names(.)) estimate else surv, na.rm=TRUE),
-        lower_surv = mean(if("lcl" %in% names(.)) lcl else lower_surv, na.rm=TRUE),
-        upper_surv = mean(if("ucl" %in% names(.)) ucl else upper_surv, na.rm=TRUE),
-        .groups = "drop"
-      )
-    best_models_phi_data[[length(best_models_phi_data) + 1]] <- phi_agg
-    
-    # --- Aggregate p (Capture Prob) ---
-    p_agg <- best_res$p %>%
-      mutate(
-        season_num = (season_index %% 4) + 1,
-        season_effect = factor(season_num, levels = 1:4, labels = season_labels)
-      ) %>%
-      group_by(cluster, season_index, season_effect) %>%
-      summarise(
-        cap_prob = mean(if("estimate" %in% names(.)) estimate else p, na.rm=TRUE),
-        lower_p = mean(if("lcl" %in% names(.)) lcl else lower_p, na.rm=TRUE),
-        upper_p = mean(if("ucl" %in% names(.)) ucl else upper_p, na.rm=TRUE),
-        .groups = "drop"
-      )
-    best_models_p_data[[length(best_models_p_data) + 1]] <- p_agg
+  if (!is.null(res)) {
+    res$name <- model_def$name
+    results_list[[model_def$name]] <- res
+    cat(paste0("Done (AICc: ", round(res$model$results$AICc, 2), ")\n"))
   }
 }
 
-final_phi_results <- bind_rows(best_models_phi_data)
-final_p_results   <- bind_rows(best_models_p_data)
+# --- Model selection via AICc ---
+df_aic <- bind_rows(lapply(results_list, function(x) {
+  data.frame(
+    Model = x$name,
+    npar = x$model$results$npar,
+    AICc = x$model$results$AICc
+  )
+})) %>%
+  arrange(AICc) %>%
+  mutate(DeltaAICc = AICc - min(AICc))
+
+cat("\n=== Model Selection Table ===\n")
+print(df_aic)
+
+# Extract best model
+best_model_name <- df_aic$Model[1]
+best_model_obj <- results_list[[best_model_name]]
+
+cat(paste0("\nBest Model Selected: ", best_model_name, "\n"))
 
 # ===================================================================
-# 7. Apply Emigration Correction (For Phi Only)
+# 7. Extract Best Model Results
+# ===================================================================
+
+season_labels <- c("1:Sp-Su", "2:Su-Au", "3:Au-Wi", "4:Wi-Sp")
+
+# ----- Extract survival (Phi) -----
+phi_real_df <- get.real(best_model_obj$model, "Phi", se = TRUE, vcv = FALSE)
+
+final_phi_results <- phi_real_df %>%
+  rename(cluster = !!sym(cl_var)) %>%
+  mutate(
+    time = as.numeric(as.character(time)),
+    season_index = time + START_SEASON_INDEX,
+    season_num = (season_index %% 4) + 1,
+    season_effect = factor(season_num, levels = 1:4, labels = season_labels)
+  ) %>%
+  group_by(cluster, season_index, season_effect) %>%
+  summarise(
+    surv = mean(estimate, na.rm = TRUE),
+    lower_surv = mean(lcl, na.rm = TRUE),
+    upper_surv = mean(ucl, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----- Extract capture probability (p) -----
+p_real_df <- get.real(best_model_obj$model, "p", se = TRUE, vcv = FALSE)
+
+final_p_results <- p_real_df %>%
+  rename(cluster = !!sym(cl_var)) %>%
+  mutate(
+    time = as.numeric(as.character(time)),
+    season_index = time + START_SEASON_INDEX,
+    season_num = (season_index %% 4) + 1,
+    season_effect = factor(season_num, levels = 1:4, labels = season_labels)
+  ) %>%
+  group_by(cluster, season_index, season_effect) %>%
+  summarise(
+    cap_prob = mean(estimate, na.rm = TRUE),
+    lower_p = mean(lcl, na.rm = TRUE),
+    upper_p = mean(ucl, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ===================================================================
+# 8. Apply Emigration Correction (For Phi Only)
 # ===================================================================
 
 if (nrow(final_phi_results) > 0) {
@@ -301,7 +312,7 @@ if (nrow(final_phi_results) > 0) {
   
   if (any(is.na(all_results_corrected$fidelity))) {
     missing_count <- sum(is.na(all_results_corrected$fidelity))
-    warning(paste0("Warning: Emigration rates are missing for ", missing_count, " rows. Check cluster IDs or season labels."))
+    warning(paste0("Warning: Emigration rates missing for ", missing_count, " rows."))
     all_results_corrected$fidelity[is.na(all_results_corrected$fidelity)] <- 1
   }
   
@@ -328,44 +339,12 @@ if (nrow(final_phi_results) > 0) {
 }
 
 # ===================================================================
-# 8. Prepare Data for Graphs
+# 9. Prepare Data for Graphs & Generate Plots
 # ===================================================================
 
 if (nrow(all_results_best_models) > 0) {
   all_results_best_models$cluster <- as.factor(all_results_best_models$cluster)
 }
-if (nrow(final_p_results) > 0) {
-  final_p_results$cluster <- as.factor(final_p_results$cluster) 
-}
-
-# Mean lifespan data
-mean_life_data <- all_results_best_models %>%
-  group_by(cluster) %>%
-  summarise(
-    mean_life_years = sum(cum_surv, na.rm = TRUE) / 4,
-    lower_ci_years = sum(cum_lower, na.rm = TRUE) / 4,
-    upper_ci_years = sum(cum_upper, na.rm = TRUE) / 4,
-    .groups = "drop"
-  )
-
-# Seasonal survival data
-seasonal_survival <- all_results_best_models %>%
-  mutate(
-    season_transition = factor((season_index %% 4) + 1, 
-                               labels = c("1:Sp-Su", "2:Su-Au", "3:Au-Wi", "4:Wi-Sp"))
-  )
-
-# ===================================================================
-# 9. Generate Plots
-# ===================================================================
-
-my_palette <- "Set1"
-common_theme <- theme_bw(base_size = 14) +
-  theme(strip.background = element_rect(fill = "#f0f0f0"), legend.position = "bottom")
-
-# ===================================================================
-# 9.6. Specific Plot: Age 0 Autumn to Age 1 Autumn Survival
-# ===================================================================
 
 # index 2: Au-Wi, 3: Wi-Sp, 4: Sp-Su, 5: Su-Au
 age0_annual_data <- all_results_best_models %>%
@@ -378,7 +357,7 @@ age0_annual_data <- all_results_best_models %>%
     .groups = "drop"
   )
 
-# index 2: Au-Wi, 3: Wi-Sp, 4: Sp-Su, 5: Su-Au
+# index 6: Au-Wi, 7: Wi-Sp, 8: Sp-Su, 9: Su-Au
 age1_annual_data <- all_results_best_models %>%
   filter(season_index %in% c(6, 7, 8, 9)) %>%
   group_by(cluster) %>%
@@ -389,19 +368,18 @@ age1_annual_data <- all_results_best_models %>%
     .groups = "drop"
   )
 
-# ===================================================================
-# 9.6. Specific Plot: Age 0 Autumn to Age 1 Autumn (Large Text)
-# ===================================================================
+my_palette <- "Set1"
 
 p_age0_annual <- ggplot(age0_annual_data, aes(x = cluster, y = annual_surv_rate, fill = cluster)) +
   geom_bar(stat = "identity", width = 0.6, alpha = 0.8, color = "black") + 
   geom_errorbar(aes(ymin = annual_lower, ymax = annual_upper), width = 0.2, linewidth = 1.2) +
   geom_text(aes(label = sprintf("%.3f", annual_surv_rate)), 
             vjust = -2.0, size = 10, fontface = "bold") +
-  scale_fill_brewer(palette = my_palette) +
+  #scale_fill_brewer(palette = my_palette) +
+  scale_fill_manual(values = CLUSTER_COLORS) +
   labs(
     title = "Annual Survival: Age 0-Aut to Age 1-Aut",
-    subtitle = "Calculated from True Survival Rates",
+    subtitle = paste0("Model: ", best_model_name),
     x = "Cluster",
     y = "Survival Probability"
   ) +
@@ -418,17 +396,16 @@ p_age0_annual <- ggplot(age0_annual_data, aes(x = cluster, y = annual_surv_rate,
     plot.margin = margin(1, 1, 1, 1, "cm")
   )
 
-print(p_age0_annual)
-
 p_age1_annual <- ggplot(age1_annual_data, aes(x = cluster, y = annual_surv_rate, fill = cluster)) +
   geom_bar(stat = "identity", width = 0.6, alpha = 0.8, color = "black") + 
   geom_errorbar(aes(ymin = annual_lower, ymax = annual_upper), width = 0.2, linewidth = 1.2) +
   geom_text(aes(label = sprintf("%.3f", annual_surv_rate)), 
             vjust = -2.0, size = 10, fontface = "bold") +
-  scale_fill_brewer(palette = my_palette) +
+  #scale_fill_brewer(palette = my_palette) +
+  scale_fill_manual(values = CLUSTER_COLORS) +
   labs(
     title = "Annual Survival: Age 1-Aut to Age 2-Aut",
-    subtitle = "Calculated from True Survival Rates",
+    subtitle = paste0("Model: ", best_model_name),
     x = "Cluster",
     y = "Survival Probability"
   ) +
@@ -445,24 +422,68 @@ p_age1_annual <- ggplot(age1_annual_data, aes(x = cluster, y = annual_surv_rate,
     plot.margin = margin(1, 1, 1, 1, "cm")
   )
 
-print(p_age1_annual)
+# ===================================================================
+# Calculate Expected Lifespan and create plot (with error bars)
+# ===================================================================
+# Calculate expected lifespan and approximate confidence intervals (Sum of cum_surv * 0.25)
+lifespan_data <- all_results_best_models %>%
+  group_by(cluster) %>%
+  summarise(
+    mean_lifespan_years = sum(cum_surv) / 4,
+    lifespan_lower = sum(cum_lower) / 4,
+    lifespan_upper = sum(cum_upper) / 4,
+    .groups = "drop"
+  )
+
+# Create mean lifespan plot
+p_lifespan <- ggplot(lifespan_data, aes(x = cluster, y = mean_lifespan_years, fill = cluster)) +
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.8, color = "black") + 
+  # Add error bars
+  geom_errorbar(aes(ymin = lifespan_lower, ymax = lifespan_upper), width = 0.2, linewidth = 1.2) +
+  # Adjust vjust to -2.0 to prevent overlap with error bars
+  geom_text(aes(label = sprintf("%.2f", mean_lifespan_years)), 
+            vjust = -2.0, size = 10, fontface = "bold") +
+  #scale_fill_brewer(palette = my_palette) +
+  scale_fill_manual(values = CLUSTER_COLORS) +
+  labs(
+    title = "Mean Lifespan from First Capture",
+    subtitle = paste0("Model: ", best_model_name),
+    x = "Cluster",
+    y = "Expected Lifespan (Years)"
+  ) +
+  # Extend Y-axis limit to accommodate the upper error bar
+  coord_cartesian(ylim = c(0, max(lifespan_data$lifespan_upper) * 1.2)) +
+  theme_bw() + 
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 20, hjust = 0.5, margin = margin(b = 20)),
+    axis.title.x = element_text(size = 30, face = "bold", margin = margin(t = 15)),
+    axis.title.y = element_text(size = 30, face = "bold", margin = margin(r = 15)),
+    axis.text.x = element_text(size = 30, color = "black"),
+    axis.text.y = element_text(size = 30, color = "black"),
+    legend.position = "none",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
 
 # ===================================================================
 # 10. Export
 # ===================================================================
 
-# PDF Export
 pdf_filename <- paste0("Survival_Analysis_", FILE_SUFFIX, ".pdf")
 pdf(pdf_filename, width = 11, height = 8.5)
 print(p_age0_annual) 
 print(p_age1_annual)
+print(p_lifespan)
 dev.off()
 message(paste0("PDF exported: ", getwd(), "/", pdf_filename))
 
-# CSV Exports
-write_csv(all_results_best_models, paste0("survival_data_", FILE_SUFFIX, ".csv"))
+csv_filename <- paste0("survival_data_", FILE_SUFFIX, ".csv")
+write_csv(all_results_best_models, csv_filename)
+message(paste0("CSV exported: ", getwd(), "/", csv_filename))
 
 message("All files exported successfully.")
 
-print(final_p_results)
+# Print result table to console
+cat("\n=== Final Capture Probabilities (p) ===\n")
+print(head(final_p_results, 10))
 
