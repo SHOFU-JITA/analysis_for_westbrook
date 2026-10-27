@@ -27,7 +27,7 @@ SCRIPT_DIR <- getwd()
 csv_file_path <- "../hindcast/GR5H_Simulated_Discharge_WB_2000_2025.csv"
 if (!file.exists(csv_file_path)) stop("CSV file not found.")
 
-# 共通のカスタムテーマ（モノクロ・文字サイズ調整版）
+# Custom theme settings
 custom_theme <- theme_bw(base_size = 18) + 
   theme(
     legend.position = "none",
@@ -44,22 +44,19 @@ custom_theme <- theme_bw(base_size = 18) +
 # =============================================================================
 # Format columns: Convert Hourly to Daily, filter data (2000-2015), add Season
 # =============================================================================
-message("時間単位(Hourly)データを日平均(Daily)に集約しています...")
+message("Aggregating hourly data to daily averages...")
 
 df <- read_csv(csv_file_path) %>%
-  # 1. Date_Hour (時間) から Date (日) を抽出
   mutate(Date = as.Date(Date_Hour)) %>%
-  # 2. 日ごとにグループ化し、日平均流量を計算
   group_by(Site_Name, Date) %>%
   summarise(
     Q_sim_m3s = mean(Q_sim_m3s, na.rm = TRUE),
     .groups = 'drop'
   ) %>%
-  # 3. 年・月・季節などの情報を追加
+  # Add temporal and seasonal variables
   mutate(
     year = year(Date),
     month = month(Date),
-    # 定義: 春(3-5), 夏(6-8), 秋(9-11), 冬(12-2)
     Season = case_when(
       month %in% c(12, 1, 2) ~ "Winter",
       month %in% c(3, 4, 5) ~ "Spring",
@@ -75,7 +72,7 @@ df <- read_csv(csv_file_path) %>%
 # =============================================================================
 # Plot 1-3: Weekly, Monthly, Seasonal flow visualization
 # =============================================================================
-message("Weekly, Monthly, Seasonal プロットを作成中...")
+message("Generating Weekly, Monthly, and Seasonal plots...")
 
 # Weekly Plot
 weekly_flow <- df %>%
@@ -142,7 +139,7 @@ plot_seasonal <- ggplot(seasonal_flow, aes(x = season_date, y = mean_flow)) +
   geom_errorbar(aes(ymin = mean_flow - se_flow, ymax = mean_flow + se_flow), 
                 color = "black", width = 45, alpha = 0.7) +
   geom_line(color = "black", linewidth = 0.8) + 
-  geom_point(color = "black", size = 2) +      
+  geom_point(color = "black", size = 2) +       
   facet_wrap(~ Site_Name, scales = "free_y", ncol = 1) +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
   coord_cartesian(ylim = c(0, NA)) +
@@ -156,7 +153,7 @@ plot_seasonal <- ggplot(seasonal_flow, aes(x = season_date, y = mean_flow)) +
 # =============================================================================
 # Plot 4-5: Extreme Flow Events 
 # =============================================================================
-message("Extreme Events プロットを作成中...")
+message("Generating Extreme Events plots...")
 
 thresholds <- df %>%
   filter(Q_sim_m3s > 0) %>%
@@ -219,11 +216,11 @@ dev.off()
 message(paste("All 5 graphs successfully saved to:", pdf_filename))
 
 # =============================================================================
-# Section 6: Detrended Annual Mean Flow Cross-site Correlation (全期間・年間ベース)
+# Section 6: Detrended Annual Mean Flow Cross-site Correlation 
 # =============================================================================
 message("Detrending annual mean flows and calculating correlations...")
 
-# 1. 年平均流量の算出とDetrending (線形回帰によるトレンド除去・残差の抽出)
+# 1. Calculate and detrend annual mean flow
 annual_flow <- df %>%
   group_by(Site_Name, year) %>%
   summarise(
@@ -234,7 +231,7 @@ annual_flow <- df %>%
 detrended_annual <- annual_flow %>%
   group_by(Site_Name) %>%
   mutate(
-    # nが3以上かつ分散が0より大きい場合のみ回帰を実行
+    # Run regression only if n >= 3 and variance > 0
     mean_flow_res = if (n() >= 3 && sd(annual_mean_flow, na.rm = TRUE) > 0) {
       residuals(lm(annual_mean_flow ~ year, na.action = na.exclude))
     } else {
@@ -243,7 +240,7 @@ detrended_annual <- annual_flow %>%
   ) %>%
   ungroup()
 
-# 2. 全期間（年間ベース）のペアワイズ相関を計算
+# 2. Calculate pairwise correlations (annual)
 wide_res <- detrended_annual %>%
   select(year, Site_Name, mean_flow_res) %>%
   pivot_wider(names_from = Site_Name, values_from = mean_flow_res) %>%
@@ -290,15 +287,14 @@ write_csv(cor_export_data, csv_out_path)
 message(paste("Detrended annual mean correlation saved to:", csv_out_path))
 
 # =============================================================================
-# Section 6: Detrended Seasonal Mean Flow Cross-site Correlation
+# Section 7: Detrended Seasonal Mean Flow Cross-site Correlation
 # =============================================================================
 message("Detrending seasonal mean flows and calculating correlations...")
 
-# 1. Detrending (線形回帰によるトレンド除去・残差の抽出)
+# 1. Detrend seasonal flow
 detrended_seasonal <- seasonal_flow %>%
   group_by(Site_Name, Season) %>%
   mutate(
-    # nが3以上かつ分散が0より大きい場合のみ回帰を実行
     mean_flow_res = if (n() >= 3 && sd(mean_flow, na.rm = TRUE) > 0) {
       residuals(lm(mean_flow ~ bio_year, na.action = na.exclude))
     } else {
@@ -310,7 +306,7 @@ detrended_seasonal <- seasonal_flow %>%
 cor_results_mean <- list()
 seasons_list <- levels(detrended_seasonal$Season)
 
-# 2. 季節ごとにペアワイズ相関を計算
+# 2. Calculate pairwise correlations per season
 for (sea in seasons_list) {
   wide_res <- detrended_seasonal %>%
     filter(Season == sea) %>%
@@ -362,14 +358,14 @@ message(paste("Detrended seasonal mean correlation saved to:", csv_out_path))
 
 
 # =============================================================================
-# Section 7: Detrended Extreme Events Cross-site Correlation (Annual & Seasonal)
+# Section 8: Detrended Extreme Events Cross-site Correlation (Annual & Seasonal)
 # =============================================================================
 message("Detrending extreme events and calculating correlations...")
 
-# 相関計算用関数（内部でトレンド除去を行う）
+# Function to calculate correlations (includes internal detrending)
 calculate_event_correlations <- function(df_long, context_label, time_col) {
   
-  # トレンド除去: Event日数 ~ 年
+  # Detrending: Event days ~ Year
   df_detrended <- df_long %>%
     group_by(Site_Name) %>%
     mutate(
@@ -381,7 +377,7 @@ calculate_event_correlations <- function(df_long, context_label, time_col) {
     ) %>%
     ungroup()
   
-  # 残差を使ってWide型へ
+  # Pivot residuals to wide format
   wide_df <- df_detrended %>%
     select(all_of(time_col), Site_Name, Days_res) %>%
     pivot_wider(names_from = Site_Name, values_from = Days_res)
@@ -457,4 +453,3 @@ write_csv(extreme_cor_df, csv_extreme_out_path)
 
 message(paste("Detrended extreme events correlation saved to:", csv_extreme_out_path))
 message("Analysis Complete.")
-

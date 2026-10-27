@@ -23,7 +23,6 @@ if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
 # =============================================================================
 # 1. Basic Settings & Data Loading
 # =============================================================================
-# File path
 file_path <- "../Clustering/WB_bkt_clustered_rev2.csv"
 OUTPUT_FILENAME <- "Combined_Cluster_Dynamics_k4_vs_k9.pdf"
 
@@ -34,22 +33,22 @@ min_year <- min(years_wb)
 river_levels <- c("Metapopulation", "WB", "OL", "OS", "IL")
 
 # -----------------------------------------------------------------------------
-# カラーパレットのカスタマイズ (クラスターと色の対応を入れ替え)
+# Customize Color Palettes
 # -----------------------------------------------------------------------------
-# Set1の全9色を取得
-# (1:赤, 2:青, 3:緑, 4:紫, 5:オレンジ, 6:黄, 7:茶, 8:ピンク, 9:グレー)
+# Get all 9 colors from Set1 
+# (1:Red, 2:Blue, 3:Green, 4:Purple, 5:Orange, 6:Yellow, 7:Brown, 8:Pink, 9:Gray)
 set1_colors <- brewer.pal(9, "Set1")
 
-# k=4 の色の割り当て (例: cluster 1 = 4番目[紫], cluster 2 = 3番目[緑], 3=1番目[赤], 4=2番目[青])
+# Assign colors for k=4
 order_k4 <- c(4, 3, 1, 2)
 COLORS_K4 <- set1_colors[order_k4]
 
-# k=9 の色の割り当て (例: cluster 1 = 4番目, cluster 2 = 3番目, 残りは適宜割り当て)
+# Assign colors for k=9
 order_k9 <- c(4, 3, 1, 2, 5, 6, 7, 8, 9)
 COLORS_K9 <- set1_colors[order_k9]
 # -----------------------------------------------------------------------------
 
-# 共通テーマ
+# Common plotting theme
 shared_theme <- theme_bw(base_size = 20) +
   theme(
     text = element_text(color = "black", face = "bold"),
@@ -66,7 +65,7 @@ shared_theme <- theme_bw(base_size = 20) +
     legend.position = "bottom"
   )
 
-# 河川名の統一関数
+# Function to standardize river names
 rename_river_func <- function(df, col_name) {
   df %>%
     mutate(!!sym(col_name) := case_when(
@@ -81,24 +80,22 @@ rename_river_func <- function(df, col_name) {
     mutate(!!sym(col_name) := factor(!!sym(col_name), levels = river_levels))
 }
 
-# データ読み込み
 df_raw <- read_csv(file_path, show_col_types = FALSE) %>%
   mutate(date = as.Date(date))
 
 # =============================================================================
-# 2. グラフ作成関数の定義 (データ処理・モデリング・作図を一括実行)
+# 2. Define Plotting Function (Data Processing, Modeling, and Plotting)
 # =============================================================================
 create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = TRUE) {
   
   TARGET_CLUSTER_COL <- paste0("cluster_k", k_val)
   ref_cluster <- as.character(k_val)
   
-  # ターゲットとなるクラスター列の抽出とファクタ化
   df_k <- data_raw %>%
     rename(ocluster_rename_dynamic = !!sym(TARGET_CLUSTER_COL)) %>%
     mutate(ocluster_rename_dynamic = relevel(factor(ocluster_rename_dynamic, levels = as.character(1:k_val)), ref = ref_cluster))
   
-  # Multiタグの特定
+  # Identify 'Multi' tags
   river_tags <- df_k %>% filter(cohort %in% years_wb) %>% distinct(tag, river)
   multi_tags <- river_tags %>% count(tag) %>% filter(n > 1) %>% pull(tag)
   
@@ -116,7 +113,7 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
     ) %>%
     mutate(year_centered = cohort_numeric - min_year)
   
-  # 実測割合の計算
+  # Calculate observed proportions
   proportion_data <- df_model %>%
     group_by(river_grp, cohort, cohort_numeric, year_centered, ocluster_rename_dynamic) %>%
     summarise(n_cluster_tags = n_distinct(tag), .groups = "drop") %>%
@@ -132,14 +129,14 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
       proportion = if_else(river_grp != "west brook" & cohort_numeric < 2002, NA_real_, proportion)
     )
   
-  # 多様度指数 (Metapopulationのみ計算)
+  # Calculate Simpson Diversity Index (only for Metapopulation)
   simpson_data <- plot_data_full %>%
     filter(!is.na(proportion)) %>% 
     group_by(river_grp, cohort_numeric) %>%
     summarise(simpson_index = 1 - sum(proportion^2, na.rm = TRUE), .groups = "drop") %>%
     filter(river_grp == "All Rivers")
   
-  # モデリング1: All Rivers (独立)
+  # Model 1: All Rivers (Independent)
   multinom_results_all <- df_model %>%
     filter(river_grp == "All Rivers") %>%
     group_by(river_grp) %>% nest() %>%
@@ -158,7 +155,7 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
     filter(river_grp == "All Rivers") %>%
     left_join(predicted_data_all, by = c("river_grp", "cohort_numeric", "ocluster_rename_dynamic"))
   
-  # モデリング2: 支流 (交互作用)
+  # Model 2: Tributaries (Interaction)
   df_interaction <- df_model %>% filter(river_grp != "All Rivers")
   
   full_model <- multinom(
@@ -183,7 +180,7 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
     filter(river_grp != "All Rivers") %>%
     left_join(predicted_interaction, by = c("river_grp", "cohort_numeric", "ocluster_rename_dynamic"))
   
-  # データの結合と名称統一
+  # Combine data and standardize names
   data_vertical <- bind_rows(
     plot_data_all %>% select(river_grp, cohort_numeric, ocluster_rename_dynamic, proportion, predicted_prop),
     plot_data_interaction %>% select(river_grp, cohort_numeric, ocluster_rename_dynamic, proportion, predicted_prop)
@@ -198,17 +195,17 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
     summarise(total_n = n_distinct(tag), .groups = "drop") %>%
     mutate(label = paste0("n = ", total_n))
   
-  # X軸のスケール設定 (パッチワーク用)
+  # Set X-axis scales for patchwork
   x_scale_show <- scale_x_continuous(breaks = seq(2000, 2015, by = 2), limits = c(min(years_wb), max(years_wb)))
   x_scale_hide <- scale_x_continuous(breaks = seq(2000, 2015, by = 2), limits = c(min(years_wb), max(years_wb)), labels = NULL)
   x_scales_list <- list(x_scale_show, x_scale_hide, x_scale_hide, x_scale_hide, x_scale_show)
   
-  # 作図
+  # Generate plot
   p <- ggplot(data_vertical, aes(x = cohort_numeric)) +
     geom_point(aes(y = proportion, color = ocluster_rename_dynamic, group = ocluster_rename_dynamic), size = 3, alpha = 0.6) +
     geom_line(aes(y = predicted_prop, color = ocluster_rename_dynamic, group = ocluster_rename_dynamic), linewidth = 2) +
     
-    # Diversity Index (Metapopulationのみに描画される)
+    # Diversity Index (plotted only for Metapopulation)
     geom_line(data = simpson_data, aes(y = simpson_index), color = "black", linetype = "dashed", linewidth = 1.2) +
     geom_point(data = simpson_data, aes(y = simpson_index), color = "black", shape = 17, size = 4) +
     
@@ -219,12 +216,12 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
     
     labs(
       x = "Year (Cohort)", 
-      y = if(is_left_plot) "Proportion / Diversity Index" else "", # 右側のグラフはY軸ラベルを省略してスッキリさせる
+      y = if(is_left_plot) "Proportion / Diversity Index" else "", # Hide Y-axis label on the right plot for a cleaner look
       color = paste0("Cluster (k=", k_val, ")")
     ) +
     scale_color_manual(
       values = cluster_colors[1:k_val],
-      # ★ 5個で折り返して2行にする設定 (byrow = TRUE で左から右へ並べる)
+      # Wrap legend into 2 rows with 5 items per row
       guide = guide_legend(ncol = 5, byrow = TRUE) 
     ) +
     shared_theme +
@@ -234,7 +231,7 @@ create_cluster_plot <- function(data_raw, k_val, cluster_colors, is_left_plot = 
 }
 
 # =============================================================================
-# 3. グラフ生成と結合
+# 3. Generate and Combine Plots
 # =============================================================================
 cat("\nProcessing k=4...\n")
 p_left <- create_cluster_plot(df_raw, k_val = 4, cluster_colors = COLORS_K4, is_left_plot = TRUE)
@@ -242,8 +239,8 @@ p_left <- create_cluster_plot(df_raw, k_val = 4, cluster_colors = COLORS_K4, is_
 cat("Processing k=9...\n")
 p_right <- create_cluster_plot(df_raw, k_val = 9, cluster_colors = COLORS_K9, is_left_plot = FALSE)
 
-# 左右のグラフを結合
-# guides="keep"にすることで、それぞれのクラスター凡例（k=4とk=9）を並べて表示させます
+# Combine left and right plots
+# Use guides="keep" to display legends for both k=4 and k=9
 combined_plot <- p_left + p_right + 
   plot_layout(ncol = 2, guides = "keep") & 
   theme(legend.position = "bottom")
@@ -259,4 +256,3 @@ output_path <- file.path(SCRIPT_DIR, OUTPUT_FILENAME)
 ggsave(filename = output_path, plot = combined_plot, width = 14, height = total_pdf_height)
 
 cat("\n✅ Saved successfully: ", output_path, "\n")
-

@@ -1,7 +1,8 @@
 # ===================================================================
 # Westbrook Portfolio Effect Analysis (Combined: Static & Dynamic)
-  # ===================================================================
-# ===== 0. Reset environment & User Configuration =====
+# ===================================================================
+
+# ===== 0. Reset Environment & User Configuration =====
 rm(list = ls(all.names = TRUE))
 
 CLUSTER_NUM <- 3
@@ -9,7 +10,7 @@ WINDOW_SIZE <- 10
 TARGET_CLUSTER_COL <- paste0("cluster_k", CLUSTER_NUM)
 CLUSTER_IDS <- c("1", "2", "3") # Adjust according to CLUSTER_NUM
 
-# 色指定を名前付きベクトルに変更（一部のクラスターのみを描画する際に色がずれないようにするため）
+# Named vector to ensure consistent coloring when plotting specific clusters
 CLUSTER_COLORS <- c("1" = "steelblue", "2" = "aquamarine3", "3" = "salmon3")
 
 INPUT_FILE <- "../csv/WB_combined_bkt_rev2.csv"
@@ -37,7 +38,7 @@ if (rstudioapi::isAvailable()) {
   }, silent = TRUE)
 }
 
-# ===== 3. Data Loading and Preprocessing (Common) =====
+# ===== 3. Data Loading and Preprocessing =====
 data <- read_csv(INPUT_FILE, show_col_types = FALSE) %>%
   mutate(date = as.Date(date))
 
@@ -118,16 +119,15 @@ pe_river_effect <- cv_w_mean_river_cluster - cv_w_mean_cluster
 # ===================================================================
 # Helper Function: Partial Spearman Correlation
 # ===================================================================
-# 裾依存的同期性（Tail-dependent synchrony）を計算するためのヘルパー関数
 calc_partial_spearman <- function(x, y, b_l, b_u) {
-  # 経験的累積分布関数（ECDF）に基づくランク（分位数）の計算
+  # Calculate ranks (quantiles) based on ECDF
   u <- rank(x, ties.method = "average") / (length(x) + 1)
   v <- rank(y, ties.method = "average") / (length(y) + 1)
   
-  # 指定された分位数範囲に両方の変数が該当するインデックスを抽出
+  # Extract indices where both variables fall within the specified quantile range
   idx <- which(u >= b_l & u <= b_u & v >= b_l & v <= b_u)
   
-  # サンプルサイズが小さすぎる場合はNAを返す
+  # Return NA if sample size is too small
   if (length(idx) < 3) return(NA_real_)
   
   return(cor(x[idx], y[idx], method = "spearman"))
@@ -193,7 +193,7 @@ for (w_name in names(windows)) {
     contribution_results[[paste(w_name, cid)]] <- data.frame(Window = w_name, cluster_id = cid, contribution_effect = wm_temp - wm_r)
   }
   
-  # Analysis C: Tail-dependent Synchrony (Cluster 3 vs Othersのみに限定)
+  # Analysis C: Tail-dependent Synchrony (Cluster 3 vs Others only)
   window_r_data <- r_one_vs_others_all %>% filter(year %in% target_years)
   for (cid in c("3")) { 
     df_wide <- window_r_data %>% filter(target_cluster == cid) %>% pivot_wider(id_cols = year, names_from = is_target, values_from = r_rate)
@@ -204,16 +204,16 @@ for (w_name in names(windows)) {
     if (all(c("Target", "Others") %in% names(df_wide))) {
       valid_data <- df_wide %>% filter(is.finite(Target) & is.finite(Others))
       if (nrow(valid_data) >= 3) {
-        # 従来の全体のピアソン相関
+        # Standard Pearson correlation
         test_res <- cor.test(valid_data$Target, valid_data$Others, method = "pearson")
         r_val <- test_res$estimate
         p_val <- test_res$p.value
         
-        # 裾依存的な部分スピアマン相関の計算
+        # Tail-dependent partial Spearman correlation
         r_lower <- calc_partial_spearman(valid_data$Target, valid_data$Others, 0.0, 0.5)
         r_upper <- calc_partial_spearman(valid_data$Target, valid_data$Others, 0.5, 1.0)
         
-        # 裾依存性の強度 (Upper - Lower)
+        # Tail dependence strength (Upper - Lower)
         if(!is.na(r_upper) & !is.na(r_lower)) {
           tail_dep_strength <- r_upper - r_lower
         }
@@ -256,7 +256,7 @@ summary_metrics <- data.frame(
 
 ref_lines <- data.frame(y = c(cv_w_mean_river_cluster, cv_w_mean_river, cv_w_mean_cluster), x_start = pos_vline, x_end = x_limit_max)
 
-# Dynamic Theme Setting (共通のL字テーマ・文字を大きく・斜めを解除)
+# Custom theme settings
 custom_theme <- theme_classic(base_size = 18) +
   theme(axis.text = element_text(color = "black", face = "bold", size = 16),
         axis.text.x = element_text(angle = 0, hjust = 0.5, color = "black", face = "bold", size = 16), 
@@ -296,7 +296,7 @@ p_contrib <- ggplot(df_contrib, aes(x = Window, y = contribution_effect, group =
   scale_color_manual(values = CLUSTER_COLORS) + custom_theme +
   labs(title = "c", x = paste0(WINDOW_SIZE, "-Year Window"), y = "CV Reduction", color = "Cluster")
 
-# Plot d (Tail Dependence Plotに変更)
+# Plot d: Tail Dependence Plot
 p_sync <- ggplot(df_sync, aes(x = Window, y = tail_dependence, group = cluster_id, color = as.factor(cluster_id))) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", linewidth = 1) +
   geom_line(linewidth = 1.2) + 
@@ -336,6 +336,4 @@ ggsave(
   units = "in",
   dpi = 300
 )
-
 message("All Analysis Completed Successfully.")
-

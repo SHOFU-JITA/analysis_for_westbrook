@@ -35,9 +35,9 @@ if (!file.exists(file_path)) {
 df <- read.csv(file_path)
 
 num_clusters <- 3
-ref_cluster <- "Fast" # 基準クラスターを "Fast" (元の3) に設定
+ref_cluster <- "Fast"
 
-# クラスターの色指定
+# Define cluster colors
 CLUSTER_COLORS <- c("Slow" = "steelblue", "Intermediate" = "aquamarine3", "Fast" = "salmon3")
 
 y_axis_max_proportion <- 1
@@ -61,14 +61,13 @@ df <- df %>%
   mutate(date = as.Date(date)) %>%
   rename(ocluster_rename_dynamic = !!sym(cluster_col_name)) %>%
   mutate(
-    # 1, 2, 3 を Slow, Intermediate, Fast に変換
     ocluster_rename_dynamic = case_when(
       as.character(ocluster_rename_dynamic) == "1" ~ "Slow",
       as.character(ocluster_rename_dynamic) == "2" ~ "Intermediate",
       as.character(ocluster_rename_dynamic) == "3" ~ "Fast",
       TRUE ~ as.character(ocluster_rename_dynamic)
     ),
-    # 順序を固定し、モデリングの基準クラスターを設定
+    # Set factor levels and reference cluster
     ocluster_rename_dynamic = factor(ocluster_rename_dynamic, levels = c("Slow", "Intermediate", "Fast")),
     ocluster_rename_dynamic = relevel(ocluster_rename_dynamic, ref = ref_cluster)
   )
@@ -104,7 +103,7 @@ all_river_grps <- c(custom_order, other_rivers, "Multi")
 df_model$river_grp <- factor(df_model$river_grp, levels = all_river_grps)
 
 # =============================================================================
-# 3. Prepare Basic Data for Plotting (Observed Values)
+# 3. Prepare Plotting Data (Observed Values)
 # =============================================================================
 proportion_data <- df_model %>%
   group_by(river_grp, cohort, cohort_numeric, year_centered, ocluster_rename_dynamic) %>%
@@ -126,7 +125,7 @@ plot_data_full <- proportion_data %>%
     proportion = if_else(river_grp != "west brook" & cohort_numeric < 2002, NA_real_, proportion)
   )
 
-# --- Calculate Simpson Diversity Index (Gini-Simpson: 1 - sum(p^2)) ---
+# Calculate Simpson Diversity Index (Gini-Simpson: 1 - sum(p^2))
 simpson_data <- plot_data_full %>%
   filter(!is.na(proportion)) %>% 
   group_by(river_grp, cohort_numeric) %>%
@@ -157,7 +156,6 @@ plot_data_all <- plot_data_full %>%
   filter(river_grp == "All Rivers") %>%
   left_join(predicted_data_all, by = c("river_grp", "cohort_numeric", "ocluster_rename_dynamic"))
 
-
 # --- Analysis 2: Multinomial Logit Model with River Interaction ---
 cat("\n--- Analysis 2: Multinomial Logit Model with River Interaction ---\n")
 df_interaction <- df_model %>% filter(river_grp != "All Rivers")
@@ -183,8 +181,7 @@ plot_data_interaction <- plot_data_full %>%
   filter(river_grp != "All Rivers") %>%
   left_join(predicted_interaction, by = c("river_grp", "cohort_numeric", "ocluster_rename_dynamic"))
 
-
-# --- Analysis 3: Extract Slopes from the Integrated Model (Absolute Rate of Change) ---
+# --- Analysis 3: Extract Slopes from the Integrated Model ---
 cat("\n--- Analysis 3: Extracting slopes (Absolute Rate of Change) ---\n")
 
 df_interaction_clean <- df_model %>%
@@ -196,7 +193,6 @@ df_interaction_clean <- df_model %>%
   ) %>%
   droplevels()
 
-
 df_interaction_clean$ocluster_rename_dynamic <- relevel(df_interaction_clean$ocluster_rename_dynamic, ref = ref_cluster)
 
 full_model_clean <- multinom(
@@ -207,24 +203,22 @@ full_model_clean <- multinom(
   maxit = 1000
 )
 
-# avg_slopesを使用して確率スケールでの変化率（絶対値の割合変化）を算出
+# Calculate rate of change on probability scale (absolute proportion change)
 slopes_prob <- avg_slopes(
   full_model_clean,
   variables = "year_centered",
   by = c("river_grp", "group")
 )
 
-# 全クラスターを出力するためフィルタリングを除外
 river_slopes_global <- as.data.frame(slopes_prob) %>%
   rename(y.level = group)
 
 cat("✅ Success: Extracted absolute rate of change (slopes).\n")
-
 cat(paste0("\nSaving analysis results to '", pdf_file_path, "'...\n"))
 pdf(pdf_file_path, width = 10, height = 20)
 
 # =============================================================================
-# Analysis 4: Vertical Comparison Plot
+# 4. Vertical Comparison Plot
 # =============================================================================
 cat("\n--- Analysis 4: Vertical Comparison Plot ---\n")
 
@@ -276,11 +270,10 @@ p_vertical_stack <- ggplot(data_vertical, aes(x = cohort_numeric)) +
   scale_color_manual(values = CLUSTER_COLORS, breaks = c("Slow", "Intermediate", "Fast"))
 
 print(p_vertical_stack)
-
 dev.off()
 
 # =============================================================================
-# Data Preparation for Slope Comparison PDF (Horizontal)
+# 5. Data Preparation for Slope Comparison PDF (Horizontal)
 # =============================================================================
 model_all_rivers <- multinom_results_all$model[[1]]
 data_all_rivers <- df_model %>% 
@@ -306,14 +299,14 @@ plot_slopes_data <- bind_rows(
     select(river_grp, y.level, estimate, conf.low, conf.high)
 )
 
-# x軸の並び順を確実に Slow, Intermediate, Fast に固定する
+# Order clusters for plotting
 plot_slopes_data <- plot_slopes_data %>%
   mutate(y.level = factor(y.level, levels = c("Slow", "Intermediate", "Fast")))
 
 plot_slopes_data$river_grp <- factor(plot_slopes_data$river_grp, levels = custom_order)
 
 # =============================================================================
-# Slope Comparison PDF Output (Horizontal)
+# 6. Slope Comparison PDF Output (Horizontal)
 # =============================================================================
 pdf_slope_path <- file.path(SCRIPT_DIR, paste0("cluster_slope_bktk", num_clusters, ".pdf"))
 pdf(pdf_slope_path, width = 15, height = 4)
@@ -333,4 +326,3 @@ print(p_slopes_horizontal)
 dev.off()
 
 cat(paste0("\n✅ Saved successfully: ", pdf_file_path, "\n✅ Saved successfully: ", pdf_slope_path, "\n"))
-

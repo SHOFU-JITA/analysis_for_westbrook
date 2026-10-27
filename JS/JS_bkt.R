@@ -18,18 +18,18 @@ library(RMark)
 library(lubridate)
 library(stringr)
 library(tibble)
-library(viridis) # カラーパレット用（白黒対応）
+library(viridis)
 
 # ===== Settings =====
 RIVER_COL_NAME <- "river" 
-FILE_SUFFIX <- "bkt" # File identifier
-FILE_PATH <- "../Clustering/WB_bkt_clustered_rev2.csv" # Input file path
+FILE_SUFFIX <- "bkt" 
+FILE_PATH <- "../Clustering/WB_bkt_clustered_rev2.csv" 
 
 # Set output directory to the location of this script file
 if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
   OUTPUT_DIR <- dirname(rstudioapi::getSourceEditorContext()$path)
 } else {
-  OUTPUT_DIR <- getwd() # Fallback: Current directory
+  OUTPUT_DIR <- getwd() 
 }
 message(paste("Output Directory:", OUTPUT_DIR))
 
@@ -37,17 +37,17 @@ message(paste("Output Directory:", OUTPUT_DIR))
 MAIN_RIVER_NAME <- "WB" 
 
 # ==============================================================================
-
 # ===== 2. Load and Preprocess Data =====
+# ==============================================================================
 if (!file.exists(FILE_PATH)) stop("The specified file could not be found.")
 df_raw <- read_csv(FILE_PATH)
 df_raw$date <- as.Date(df_raw$date)
 
-# Rename river names as requested
+# Standardize river names
 df_raw <- df_raw %>%
   mutate(!!sym(RIVER_COL_NAME) := case_when(
     !!sym(RIVER_COL_NAME) == "west brook"  ~ "WB",
-    !!sym(RIVER_COL_NAME) == "wb jimmy"   ~ "OL",
+    !!sym(RIVER_COL_NAME) == "wb jimmy"    ~ "OL",
     !!sym(RIVER_COL_NAME) == "wb mitchell" ~ "OS",
     !!sym(RIVER_COL_NAME) == "wb obear"    ~ "IL",
     TRUE ~ !!sym(RIVER_COL_NAME)
@@ -55,7 +55,9 @@ df_raw <- df_raw %>%
 
 message("Data loaded. Preparing Capture History...")
 
+# ==============================================================================
 # ===== 3. Create Seasonal Capture History =====
+# ==============================================================================
 df <- df_raw %>%
   mutate(
     year = year(date),
@@ -82,7 +84,9 @@ capture_history_sorted <- capture_history_wide %>%
 
 message("Capture History created.")
 
+# ==============================================================================
 # ===== 4. Define Function for POPAN Estimation =====
+# ==============================================================================
 estimate_N_POPAN <- function(data, river_name) {
   ch_data <- data
   ch_cols_local <- names(ch_data)[!names(ch_data) %in% c("tag", RIVER_COL_NAME)]
@@ -142,7 +146,9 @@ estimate_N_POPAN <- function(data, river_name) {
   return(est_df)
 }
 
+# ==============================================================================
 # ===== 5. Run Analysis by River =====
+# ==============================================================================
 river_list <- sort(unique(capture_history_sorted[[RIVER_COL_NAME]]))
 all_estimates <- list()
 
@@ -164,10 +170,12 @@ for (riv in river_list) {
 if (length(all_estimates) == 0) stop("No valid analysis results obtained.")
 base_results <- bind_rows(all_estimates)
 
+# ==============================================================================
 # ===== 6. Process Results (Filter S3 & Years, Add Total) =====
+# ==============================================================================
 message("\nProcessing results for S3 and calculating Totals...")
 
-# 6-1. Extract S3 only
+# Extract S3 only
 results_s3 <- base_results %>%
   separate(season_label, into = c("year_str", "season_str"), sep = "-", remove = FALSE) %>%
   mutate(
@@ -176,14 +184,14 @@ results_s3 <- base_results %>%
   ) %>%
   filter(season == 3)
 
-# 6-2. Filter by river and year ranges
+# Filter by river and year ranges
 filtered_results <- results_s3 %>%
   filter(
     (river == MAIN_RIVER_NAME & year >= 2000 & year <= 2015) |
       (river != MAIN_RIVER_NAME & year >= 2002 & year <= 2015)
   )
 
-# 6-3. Calculate Total (2002-2015, sum of all rivers)
+# Calculate Total (2002-2015, sum of all rivers)
 total_df <- filtered_results %>%
   filter(year >= 2002, year <= 2015) %>%
   group_by(year, season, season_label) %>%
@@ -197,12 +205,14 @@ total_df <- filtered_results %>%
     occasion_idx = NA
   )
 
-# 6-4. Combine data
+# Combine data
 final_output_df <- bind_rows(filtered_results, total_df)
 final_output_df$river <- factor(final_output_df$river, levels = c(river_list, "Total"))
 final_output_df <- final_output_df %>% arrange(river, year)
 
+# ==============================================================================
 # ===== 7. Export Results & Visualization =====
+# ==============================================================================
 
 get_output_path <- function(filename) {
   file.path(OUTPUT_DIR, filename)
@@ -217,15 +227,12 @@ message(paste0("CSV Saved: ", csv_filename))
 errorbar_data <- final_output_df %>%
   filter(river != "Total")
 
-# Plot: Overlay Plot (白黒・線種と点で区別、L字枠線)
+# Overlay Plot
 p_s3_overlay <- ggplot(final_output_df,
                        aes(x = year, y = N_est, 
                            shape = river, linetype = river, group = river)) +
-  # 色指定をなくし、すべて黒(black)で統一
   geom_line(linewidth = 1.2, color = "black") +
-  # fill = "white" を追加し、白抜き丸の背景を白で塗りつぶす（線が透けないようにする）
   geom_point(size = 4, stroke = 1, color = "black", fill = "white") +
-  # エラーバーの色も黒、少し透過させて線の邪魔にならないようにする
   geom_errorbar(data = errorbar_data,
                 aes(ymin = N_lcl, ymax = N_ucl), width = 0.3, 
                 alpha = 0.5, color = "black", linetype = "solid") +
@@ -235,7 +242,6 @@ p_s3_overlay <- ggplot(final_output_df,
   ) +
   scale_x_continuous(breaks = 2000:2015) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-  # 各河川の線の種類を明示的に指定（TotalとWBは実線、他は異なる破線）
   scale_linetype_manual(values = c(
     "WB" = "solid", 
     "IL" = "dashed", 
@@ -243,20 +249,19 @@ p_s3_overlay <- ggplot(final_output_df,
     "OL" = "dotdash", 
     "Total" = "solid"
   )) +
-  # 各河川の点の形を明示的に指定
   scale_shape_manual(values = c(
-    "WB" = 15,    # 黒四角
-    "IL" = 17,    # 黒三角
-    "OS" = 18,    # 黒菱形
-    "OL" = 21,    # 白抜き丸 (21番は境界線と塗りつぶしが別、上記fill="white"が適用される)
-    "Total" = 16  # 黒丸
+    "WB" = 15, 
+    "IL" = 17, 
+    "OS" = 18, 
+    "OL" = 21, 
+    "Total" = 16 
   )) +
   theme_classic() +
   theme(
     legend.position = "bottom",
     legend.title = element_blank(),
     legend.text = element_text(size = 12),
-    legend.key.width = unit(2.5, "cm"), # 破線がはっきり見えるように凡例の幅を少し広げる
+    legend.key.width = unit(2.5, "cm"),
     axis.text.x = element_text(size = 15, angle = 45, hjust = 1, color = "black"),
     axis.text.y = element_text(size = 15, color = "black"),
     axis.title = element_text(size = 18, face = "bold"),
@@ -266,7 +271,7 @@ p_s3_overlay <- ggplot(final_output_df,
     axis.ticks = element_line(color = "black")
   )
 
-# Export PDF (Only the overlay plot is saved)
+# Export PDF
 pdf_filename <- get_output_path(paste0("Abundance_Plot_Overlay_S3_", FILE_SUFFIX, ".pdf"))
 pdf(pdf_filename, width = 10, height = 8)
 print(p_s3_overlay)
@@ -274,7 +279,7 @@ dev.off()
 message(paste0("PDF Saved: ", pdf_filename))
 
 # ==============================================================================
-# ===== 8. Synchrony Analysis (Growth Rates r) - Matrix Output Only =====
+# ===== 8. Synchrony Analysis (Growth Rates r) - Matrix Output =====
 # ==============================================================================
 message("\nCalculating Synchrony Matrix (Growth Rates r)...")
 
@@ -347,14 +352,13 @@ formatted_r_matrix <- matrix(formatted_vals, nrow = nrow(cor_r))
 colnames(formatted_r_matrix) <- colnames(cor_r)
 rownames(formatted_r_matrix) <- rownames(cor_r)
 
-# Display results in console
 message("\n[Result] Synchrony Matrix based on Growth Rates (r):")
 res_sync_df <- as.data.frame(formatted_r_matrix) %>% 
   rownames_to_column("river")
 
 print(res_sync_df)
 
-# --- 8-4. Export CSV (Two Types) ---
+# --- Export CSV (Two Types) ---
 
 # 1. Formatted Matrix with Significance Stars
 sync_csv_formatted <- get_output_path(paste0("Synchrony_Matrix_Formatted_", FILE_SUFFIX, ".csv"))
